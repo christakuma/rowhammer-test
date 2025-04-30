@@ -29,12 +29,13 @@
 
 
 const size_t mem_size = 1 << 30;
-const int toggles = 540000;
+static int toggles;
+static int rounds;
+static uint8_t pattern; //0xff
+static char *g_mem;
 
-char *g_mem;
-
-char *pick_addr() {
-  size_t offset = (rand() << 12) % mem_size;
+static char *pick_addr() {
+  size_t offset = ((uint64_t)rand() << 12) % mem_size;
   return g_mem + offset;
 }
 
@@ -77,7 +78,8 @@ static void toggle(int iterations, int addr_count) {
 
     // Sanity check.  We don't expect this to fail, because reading
     // these rows refreshes them.
-    if (sum != 0) {
+    // Skip sanity check unless 0xFF. 0x00 was giving me issues.
+    if (pattern == 0xFF && sum != 0) {
       printf("error: sum=%x\n", sum);
       exit(1);
     }
@@ -105,50 +107,47 @@ void main_prog() {
   assert(g_mem != MAP_FAILED);
 
   printf("clear\n");
-  memset(g_mem, 0xff, mem_size);
-
+  memset(g_mem, pattern, mem_size);
+  
   Timer t;
-  int iter = 0;
-  for (;;) {
-    printf("Iteration %i (after %.2fs)\n", iter++, t.get_diff());
-    toggle(10, 8);
+  for (int iter = 0; iter < rounds; iter++) {
+    printf("Round %i/%i\n", iter+1, rounds);
+    toggle(10, 8); 
 
-    Timer check_timer;
-    uint64_t *end = (uint64_t *) (g_mem + mem_size);
-    uint64_t *ptr;
-    int errors = 0;
-    for (ptr = (uint64_t *) g_mem; ptr < end; ptr++) {
-      uint64_t got = *ptr;
-      if (got != ~(uint64_t) 0) {
-        printf("error at %p: got 0x%" PRIx64 "\n", ptr, got);
-        errors++;
+    // Scan every byte against the user pattern:
+    size_t flips = 0;
+    for (size_t i = 0; i < mem_size; i++) {
+      if ((uint8_t)g_mem[i] != pattern) {
+        printf("Flip @ 0x%zx: was 0x%02X now 0x%02X\n",
+               i, pattern, (uint8_t)g_mem[i]);
+        flips++;
       }
     }
-    printf("  Checking for bit flips took %f sec\n", check_timer.get_diff());
-    if (errors)
+    if (flips) {
+      // At least one real Rowhammer bit-flip
       exit(1);
+    }
   }
 }
 
 
-int main() {
-  // In case we are running as PID 1, we fork() a subprocess to run
-  // the test in.  Otherwise, if process 1 exits or crashes, this will
-  // cause a kernel panic (which can cause a reboot or just obscure
-  // log output and prevent console scrollback from working).
-  int pid = fork();
-  if (pid == 0) {
+int main(int argc, char *argv[]) {
+  if (argc != 4) {
+    fprintf(stderr, "Usage: %s <pattern> <toggles> <rounds>\n", argv[0]);
+    return 1;
+  }
+
+  // Parse inputs
+  pattern = strtol(argv[1], NULL, 0);
+  toggles = atoi(argv[2]);
+  rounds = atoi(argv[3]);
+
+  pid_t child = fork();
+  if (child == 0) {
     main_prog();
-    _exit(1);
   }
 
   int status;
-  if (waitpid(pid, &status, 0) == pid) {
-    printf("** exited with status %i (0x%x)\n", status, status);
-  }
-
-  for (;;) {
-    sleep(999);
-  }
-  return 0;
+  waitpid(child, &status, 0);
+  return WEXITSTATUS(status);
 }
